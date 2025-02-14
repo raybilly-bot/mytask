@@ -1,0 +1,589 @@
+import pandas as pd
+import re
+import os
+from bs4 import BeautifulSoup
+import matplotlib.pyplot as plt
+import base64
+from io import BytesIO
+import difflib
+from itertools import zip_longest
+from bs4 import BeautifulSoup, NavigableString
+import os
+
+
+
+def read_html(filename):
+    try:
+        with open(filename, 'r', encoding='windows-1252') as f:
+            return f.read()
+    except FileNotFoundError:
+        print(f"wrong,can't find '{filename}' ")
+        exit(1)
+
+
+def normalize_text(text):
+    return " ".join(text.replace("\n", " ").split())
+
+
+def get_text(tag):
+    if tag:
+        return normalize_text(tag.get_text())
+    return ""
+
+
+def highlight_text_diff(old_text, new_text, other_text=None):
+    differ = difflib.SequenceMatcher(None, old_text, new_text)
+
+    # 初始 diff_tag，默认为 2 (匹配)
+    diff_tag = 2 if old_text == new_text else 1
+
+    result = []
+    for tag, i1, i2, j1, j2 in differ.get_opcodes():
+        if tag == 'equal':
+            result.append(old_text[i1:i2])
+        elif tag in ('replace', 'delete'):
+            result.append(f'<span class="diff_sub">{old_text[i1:i2]}</span>')
+            diff_tag = 1  # 标记有区别
+        elif tag == 'insert':
+            result.append(f'<span class="diff_add">{new_text[j1:j2]}</span>')
+            diff_tag = 1  # 标记有区别
+
+    if other_text:
+        result.append(f'<span class="other_text">{other_text}</span>')
+
+    return ''.join(result), diff_tag
+
+
+def unify_th_to_td(table):
+    for th in table.find_all("th"):
+        th.name = "td"
+
+def skip_empty_row(row):
+    return not any(td.get_text(strip=True) for td in row.find_all("td"))
+
+def remove_br_in_th(soup):
+    for th in soup.find_all("th"):
+        for br in th.find_all("br"):
+            br.replace_with(" ")
+
+def mark_differences(file1, file2, output_file='diff.html'):
+    diff_tag = 3
+    html1 = read_html(file1)
+    html2 = read_html(file2)
+    soup1 = BeautifulSoup(html1, "lxml")
+    soup2 = BeautifulSoup(html2, "lxml")
+
+    remove_br_in_th(soup1)
+    remove_br_in_th(soup2)
+
+    tables1 = soup1.find_all("table")
+    tables2 = soup2.find_all("table")
+
+
+    for table1, table2 in zip(tables1, tables2):
+        body1 = table1.find("tbody") or table1
+        body2 = table2.find("tbody") or table2
+        unify_th_to_td(body1)
+        unify_th_to_td(body2)
+        rows1 = body1.find_all("tr")
+        rows2 = body2.find_all("tr")
+        rows1 = [row for row in rows1 if not skip_empty_row(row)]
+        rows2 = [row for row in rows2 if not skip_empty_row(row)]
+        max_rows = max(len(rows1), len(rows2))
+        for row1, row2 in zip_longest(rows1, rows2, fillvalue=None):
+            if not row1 or not row2:
+                continue
+            cols1 = row1.find_all("td") if row1 else []
+            cols2 = row2.find_all("td") if row2 else []
+
+            max_cols = max(len(cols1), len(cols2))
+            cols1 = cols1 + [None] * (max_cols - len(cols1))
+            cols2 = cols2 + [None] * (max_cols - len(cols2))
+            for col1, col2 in zip(cols1, cols2):
+                text1 = get_text(col1) if col1 else ""
+                text2 = get_text(col2) if col2 else ""
+                if text1 != text2:
+                    other_text = get_text(col2) if col2 else ""
+                    diff_html,diff_tag = highlight_text_diff(text1, text2, other_text)
+                    if col1:
+                        col1.clear()
+                        col1.append(BeautifulSoup(diff_html, "html.parser"))
+    styled_content = f"""
+    <html>
+    <head>
+        <meta charset="utf-8">
+        <title>HTML Compare Result</title>
+        <style>
+            body {{
+                font-family: Arial, sans-serif;
+                margin: 20px;
+            }}
+            .diff_sub {{
+                background-color: #ffb6ba; 
+                color: red;
+                text-decoration: line-through;
+            }}
+            .diff_add {{
+                background-color: #ffb6ba; 
+                color: red;
+                text-decoration: line-through;
+            }}
+            .other_text {{
+                color: blue;
+            }}
+        </style>
+    </head>
+    <body>
+        <h2 style="font-size:13px; color:#333; font-weight:bold;">红色标注：Texts in CDARS TLFs but not in SIGMA TLFs; 蓝色标注：Texts not in CDARS TLFs but in SIGMA TLFs; 黑色标注：Texts in both CDARS TLFs and SIGMA TLFs</h2>
+        {str(soup1)}
+    </body>
+    </html>
+    """
+    with open(output_file, 'w', encoding='utf-8') as f:
+        f.write(styled_content)
+    return diff_tag
+
+def extract_values(file_path):
+    values = {}
+    with open(file_path, 'r') as file:
+        for line in file:
+            if '^' in line:
+                parameter, value = line.strip().split('^', 1)
+                values[parameter] = value
+    return values
+
+#抓取tot信息
+def process_files(tots):
+    tabnos = []
+    descs = []
+    results = []
+    files = []
+    links = []
+    for tot_path in tots:
+        if os.path.exists(tot_path) == True:
+            file = tot_path
+            values = extract_values(tot_path)
+
+            tabno = values.get('TABNO', '')
+            desc = values.get('DESC', '')
+
+            result = f"{tabno} {desc}"
+            tabnos.append(tabno)
+            descs.append(desc)
+            results.append(result)
+            files.append(file.split('/')[-1])
+            links.append(file.split('.')[0].replace("tools", "table") + ".pdf")
+
+    # Create a DataFrame with the results
+    df = pd.DataFrame({
+        'Table#': tabnos,
+        'Title': descs,
+        'File': files,
+        'Link': links,
+    })
+
+    return df
+
+
+def sort_by_table_number(df, column_name='Table#', ignore_patterns=None):
+    """
+    Sort the DataFrame by the numeric parts of the column with table-like strings
+    (e.g., "Table EU.11", "Table 14.1.2", "Figure 16.3.1.2").
+
+    Args:
+    - df (pd.DataFrame): The DataFrame to sort.
+    - column_name (str): The column name containing table-like strings (default is 'Table#').
+    - ignore_patterns (list of str): List of substrings to ignore in the column (default is None).
+
+    Returns:
+    - pd.DataFrame: The DataFrame sorted by the numeric parts of the specified column.
+    """
+
+    # Default ignore patterns (if not provided)
+    if ignore_patterns is None:
+        ignore_patterns = ['Table BR', 'Table EU', 'Table PI']
+
+    # Function to check if a string starts with 'Z' followed by digits
+    def starts_with_Z_digits(table_str):
+        return bool(re.match(r'^Z\d+', table_str))
+
+    # Function to remove non-numeric prefixes and extract the numeric part
+    def extract_numbers(table_str):
+        # Check if the table string contains any of the ignore patterns
+        if any(pattern in table_str for pattern in ignore_patterns) or starts_with_Z_digits(table_str):
+            return None
+
+        # Use regex to remove the prefix (e.g., 'Table EU', 'Figure', etc.)
+        numeric_part = re.sub(r'^[a-zA-Z]+\s*[A-Za-z]*\.?', '', table_str)
+        # Split the remaining numeric part by '.' and return as a list of integers
+        return list(map(int, numeric_part.split('.')))
+
+    # Apply the extraction function to create a new column for the numeric components
+    df['numeric_parts'] = df[column_name].apply(extract_numbers)
+
+    # Filter out rows where the numeric_parts are None (i.e., rows to ignore)
+    df_filtered = df.dropna(subset=['numeric_parts'])
+
+    # Find the maximum length of the numeric parts across all rows to standardize length
+    max_length = df_filtered['numeric_parts'].apply(len).max()
+
+    # Pad the numeric parts to have equal length by appending zeros
+    #df_filtered['numeric_parts'] = df_filtered['numeric_parts'].apply(lambda x: x + [0] * (max_length - len(x)))
+    df_filtered = df.dropna(subset=['numeric_parts']).copy()
+
+    # Sort the DataFrame based on the numeric parts
+    df_sorted = df_filtered.sort_values(by='numeric_parts')
+
+    # Drop the 'numeric_parts' column for cleaner output
+    df_sorted = df_sorted.drop(columns=['numeric_parts'])
+
+    return df_sorted
+
+
+
+# Function to extract table from an HTML file
+#从html提取table
+def extract_table_from_html(file_path):
+    with open(file_path, "r", encoding="windows-1252") as file:
+        soup = BeautifulSoup(file, "html.parser")
+    # Extract all text from the HTML file
+    extracted_text = soup.get_text(separator="\n", strip=True)
+
+    # Remove everything starting from "PFIZER CONFIDENTIAL"
+
+    keyword = "PFIZER CONFIDENTIAL"
+
+    if keyword in extracted_text:
+        extracted_text = extracted_text.split(keyword)[0].strip()
+
+    # Convert extracted text into a DataFrame
+
+    df = pd.DataFrame({"Extracted Text": [extracted_text]})
+
+    return df
+
+
+# Function to highlight differences between two values
+def highlight_differences(val1, val2):
+    """ Returns highlighted HTML if values are different. """
+    if pd.isna(val1) and pd.isna(val2):
+        return "<td></td>"  # Both values are NaN, don't highlight
+    if val1 != val2:
+        return f'<td><span style="background-color: lightgreen">{val1}</span> / <span style="background-color: yellow">{val2}</span></td>'
+    return f"<td>{val1}</td>"
+
+
+# Function to compare two DataFrames and generate HTML output
+def compare_tables(cdars_df, sigma_df, output_file):
+    html_output = "<html><body><h2>Comparison Results</h2><table border='1'>"
+
+    # Add a row for column headers
+    html_output += "<tr>"
+    for col in cdars_df.columns:
+        html_output += f"<th>{col}</th>"
+    html_output += "</tr>"
+
+    # Compare row by row and column by column
+    for row1, row2 in zip(cdars_df.values, sigma_df.values):
+        html_output += "<tr>" + "".join(highlight_differences(v1, v2) for v1, v2 in zip(row1, row2)) + "</tr>"
+
+    html_output += "</table></body></html>"
+
+    # Save to output file
+    with open(output_file, "w", encoding="utf-8") as file:
+        file.write(html_output)
+
+
+def replace_tot_based_on_table_type(row):
+    # Check if the first word in 'Table#' is "Figure"
+    if row['Table#'].split()[0] == "Figure":
+        return row['File'].replace('.tot', '.pdf')
+    # Check if the first word in 'Table#' is "Table"
+    elif row['Table#'].split()[0] == "Table":
+        return row['File'].replace('.tot', '.html')
+    else:
+        return row['File']
+
+
+# Function to compare files in two directories and generate a summary report
+def compare_files_in_folders(folder1, folder2, summary_folder, meta_file):
+    summary_file = os.path.join(summary_folder, "comparison_summary.html")
+    individuals_folder = os.path.join(summary_folder, "Individuals")
+
+    # Create the folder to store comparison result files if it doesn't exist
+    if not os.path.exists(individuals_folder):
+        os.makedirs(individuals_folder)
+
+    # Create a list to store summary data
+    summary_data = []
+
+    summary_html = "<html><body><h2>Comparison Summary</h2><table border='1'>"
+    summary_html += "<tr><th>File Name</th><th>Status</th><th>Comparison Result</th></tr>"
+
+    # Prepare toc_df from report.meta
+    report_path_list = [meta_file]
+
+    # Initialize an empty list to store the rows
+    tots = []
+
+    # Open the file for reading
+    for report_path in report_path_list:
+        meta_path = report_path
+        # + '/gui/reports.meta'
+        with open(meta_path, 'r') as file:
+            reports_meta = file.readlines()
+            reports_meta = ['C:/Users/wur53/python_project/pycharm/compare/MERGE/tools/' + tot.strip()
+                            for tot in reports_meta
+                            if not (tot.startswith('#') or 'stoutput' in tot)]
+            # Read all lines from the file
+            tots.extend(reports_meta)
+
+    # Print the list to verify
+    print(tots)
+
+    # Example usage
+    toc_df = process_files(tots)
+
+    # Apply the function to the 'File' column
+    toc_df['File'] = toc_df.apply(replace_tot_based_on_table_type, axis=1)
+
+    # Read the table names from the meta file
+    table_names = toc_df['File'].tolist()
+
+    # Loop through all files listed in the meta file
+    for filename in table_names:
+        print(f"filename:{filename}")
+        file1 = os.path.join(folder1, filename)
+        file2 = os.path.join(folder2, filename)
+        print(f"filepath:{file1}")
+        # Check if file exists in both folders
+        file1_exists = os.path.exists(file1)
+        file2_exists = os.path.exists(file2)
+
+        if file1_exists and file2_exists and '.html' in filename:  # Compare only if both files exist
+            print(f"Comparing {filename}...")
+
+            # Extract tables from both HTML files
+            cdars_df = extract_table_from_html(file1)
+            sigma_df = extract_table_from_html(file2)
+
+            if cdars_df is None or sigma_df is None:
+                status = "Error: One or both tables missing"
+                comparison_link = ""
+            else:
+
+
+                # Generate comparison result for this file
+                comparison_filename = f"comparison_{filename.replace('.html', '_result.html')}"
+                comparison_result_file = os.path.join(individuals_folder, comparison_filename)
+                # ray的compare功能，传的参数是html文件
+                diff_tag = mark_differences(file1, file2, comparison_result_file)
+                # yu的compare功能，传的参数是html转为df文件
+                #compare_tables(cdars_df, sigma_df, comparison_result_file)
+                # Compare data and determine status
+                #if cdars_df.equals(sigma_df):  # ✅ Exact match
+                if diff_tag == 2:
+                    status = "Matched"
+                elif diff_tag == 1:
+                    status = "Not Matched"
+                # Link to the detailed comparison result
+                relative_link = f"SUMMARY\\Individuals\\{comparison_filename}"
+                if status == "Not Matched":
+                    comparison_link = f"<a href='{relative_link}'>View Details</a>"
+                else:
+                    comparison_link = ""
+
+        elif file1_exists and not file2_exists and '.html' in filename:
+            status = "Not Done in SIGMA"
+            comparison_link = ""
+
+        elif not file1_exists and file2_exists and '.html' in filename:
+            status = "No html. Need manual check."
+            comparison_link = ""
+
+        elif (not file1_exists and not file2_exists) or not ('.html' in filename):
+            status = "No html. Need manual check."
+            comparison_link = ""
+
+        # Append results to summary_data
+        summary_data.append([filename, status, comparison_link])
+
+        # Add row to summary report
+        # summary_html += f"<tr><td>{filename}</td><td>{status}</td><td>{comparison_link}</td></tr>"
+
+    # Convert summary data to DataFrame
+    summary_df = pd.DataFrame(summary_data, columns=["File", "Status", "Comparison Result"])
+
+    # check=summary_df
+
+    # Update the 'File' to pdf if only pdf in CDARS, e.g. Argus listing in old CDARS
+    summary_df["File"] = summary_df.apply(
+        lambda row: row["File"].replace(".html", ".pdf") if row["Status"] == "No html. Need manual check." else row[
+            "File"],
+        axis=1
+    )
+
+    # Extract the value before the first dot (.) in both 'File' columns
+    toc_df['File_key'] = toc_df['File'].apply(lambda x: x.split('.')[0])
+    toc_df.drop(columns=['File'], inplace=True)
+    summary_df['File_key'] = summary_df['File'].apply(lambda x: x.split('.')[0])
+
+    # Perform left join on the extracted 'File_key' column
+    summary_df = pd.merge(toc_df, summary_df, on='File_key', how='left')
+
+    # Drop the 'File_key' column if no longer needed
+    summary_df.drop(columns=['File_key'], inplace=True)
+
+    # Sort the DataFrame by the Table# column
+    summary_df = sort_by_table_number(summary_df, 'Table#')
+
+    # summary_html += "</table></body></html>"
+    # Export DataFrame to an HTML file
+
+    # Assuming your GIF icons are in the 'icons' folder
+    folder1_icon = 'icons/cdars.gif'
+    folder2_icon = 'icons/sigma.png'
+
+    summary_df["File Link"] = summary_df["File"].apply(lambda filename:
+                                                       f"<a href='CDARS\\{filename}'>"
+                                                       f"<img src='{folder1_icon}' style='width:30px;height:17.25px;margin-right:2px;'></a> "
+                                                       f"<a href='SIGMA\\{filename}'>"
+                                                       f"<img src='{folder2_icon}' style='width:30px;height:15.6px;margin-right:2px;'></a>"
+                                                       )
+
+    # Rename columns to match the desired names
+    summary_df = summary_df.rename(columns={
+        'File': 'File Name',
+        'Status': 'Comparison Result',
+        'Comparison Result': 'Comparison Details'
+    })
+
+    # Reorder the columns to match the desired order
+    summary_df = summary_df[['Table#', 'Title', 'File Name', 'File Link', 'Comparison Result', 'Comparison Details']]
+
+    return summary_df
+
+
+# Directories to compare
+folder1 = r"C:\Users\wur53\python_project\pycharm\compare\MERGE\CDARS"  # Replace with your first folder path
+folder2 = r"C:\Users\wur53\python_project\pycharm\compare\MERGE\SIGMA"  # Replace with your second folder path
+
+# Path for the comparison summary
+summary_folder = r"C:\Users\wur53\python_project\pycharm\compare\MERGE\SUMMARY"  # Customize path for summary file
+
+# Path to the reports.meta file
+meta_file = r"C:\Users\wur53\python_project\pycharm\compare\MERGE\reports.meta"  # Customize path to your meta file
+
+# Generate the summary comparison dataframe
+summary_df = compare_files_in_folders(folder1, folder2, summary_folder, meta_file)
+#summary_df.to_excel("comparison_summary.xlsx", index=False)
+#summary_df.to_csv("comparison_summary.csv", index=False, encoding="utf-8-sig")
+
+def generate_pie_chart_base64(summary_df):
+    # Count occurrences of each status
+    status_counts = summary_df['Comparison Result'].value_counts()
+    labels = status_counts.index
+    sizes = status_counts.values
+    total = sum(sizes)
+
+    # Label format: "Status (count, percentage)"
+    labels = [f"{label} ({count}, {count / total:.1%})" for label, count in zip(labels, sizes)]
+
+    # Create pie chart
+    fig, ax = plt.subplots(figsize=(6, 6))
+    ax.pie(sizes, labels=labels, autopct='%1.1f%%', startangle=140,
+           colors=['#4CAF50', '#FF9800', '#F44336', '#2196F3'])
+    ax.set_title("Pie Chart of Tables Comparison Result")
+
+    # Save pie chart as base64 string
+    buf = BytesIO()
+    plt.savefig(buf, format="png", bbox_inches="tight")  # Use bbox_inches="tight" to avoid clipping
+    plt.close(fig)
+    buf.seek(0)
+    img_base64 = base64.b64encode(buf.read()).decode('utf-8')
+    return f"data:image/png;base64,{img_base64}"
+
+
+def generate_summary_html(summary_df, output_path):
+    # Generate pie chart image in base64 format
+    pie_chart_img = generate_pie_chart_base64(summary_df)
+    # Convert DataFrame to HTML table (ensuring hyperlinks work)
+    summary_table_html = summary_df.to_html(index=False, escape=False, classes="table table-bordered")
+    # Create the final HTML content
+    html_content = f"""
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>C3421010 CDARS vs. SIGMA Tables Comparison Summary</title>
+        <style>
+            body {{ font-family: Arial, sans-serif; margin: 20px; }}
+            .tab {{ overflow: hidden; border-bottom: 2px solid #ccc; }}
+            .tab button {{ background-color: #f1f1f1; float: left; border: none; 
+                           outline: none; cursor: pointer; padding: 10px 20px; font-size: 16px; }}
+            .tab button:hover {{ background-color: #ddd; }}
+            .tab button.active {{ background-color: #ccc; }}
+            .tab-content {{ display: none; padding: 20px; border: 1px solid #ccc; }}
+            .table {{ width: 100%; border-collapse: collapse; margin-top: 20px; font-size: 10pt; }}
+            .table th, .table td {{ border: 1px solid #ddd; padding: 8px; text-align: left; }}
+            .table th {{ background-color: #4CAF50; color: white; }}
+            .table td:nth-child(2) {{ width: 500px; }}  /* Fixed width for 'Title' column */
+            .table td:nth-child(5) {{ width: 100px; }}  /* Fixed width for 'Comparison Result' column */
+            .table td:nth-child(6) {{ width: 80px; }}
+            img {{ width: 100%; max-width: 600px; height: auto; }}
+            .download-btn {{ background-color: #4CAF50; color: white; padding: 10px 15px; border: none; 
+                            cursor: pointer; margin-top: 20px; }}
+            .download-btn:hover {{ background-color: #45a049; }}
+        </style>
+        <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.17.0/xlsx.full.min.js"></script>
+        <script>
+            function openTab(tabName) {{
+                var i, tabcontent, tablinks;
+                tabcontent = document.getElementsByClassName("tab-content");
+                for (i = 0; i < tabcontent.length; i++) {{
+                    tabcontent[i].style.display = "none";
+                }}
+                tablinks = document.getElementsByClassName("tablinks");
+                for (i = 0; i < tablinks.length; i++) {{
+                    tablinks[i].className = tablinks[i].className.replace(" active", "");
+                }}
+                document.getElementById(tabName).style.display = "block";
+                event.currentTarget.className += " active";
+            }}
+
+            function exportTableToExcel() {{
+                var table = document.querySelector(".table");
+                var wb = XLSX.utils.table_to_book(table);
+                XLSX.writeFile(wb, "Comparison_Summary.xlsx");
+            }}
+        </script>
+    </head>
+    <body onload="document.getElementById('defaultOpen').click();">
+        <h2>C3421010 CDARS vs. SIGMA Tables Comparison Summary</h2>
+
+        <div class="tab">
+            <button class="tablinks" onclick="openTab('PieChart')" id="defaultOpen">Pie Chart</button>
+            <button class="tablinks" onclick="openTab('SummaryTable')">Summary Table</button>
+        </div>
+
+        <div id="PieChart" class="tab-content">
+            <img src="{pie_chart_img}" alt="Pie Chart">
+        </div>
+
+        <div id="SummaryTable" class="tab-content">
+            {summary_table_html}
+            <button class="download-btn" onclick="exportTableToExcel()">Download Excel</button>
+        </div>
+    </body>
+    </html>
+    """
+
+    # Save HTML to file
+    with open(output_path, "w", encoding="utf-8") as file:
+        file.write(html_content)
+
+    print(f"Summary HTML generated: {output_path}")
+# Example usage
+output_summary_html = "comparison_summary.html"
+generate_summary_html(summary_df, output_summary_html)
